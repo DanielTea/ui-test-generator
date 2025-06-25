@@ -1,0 +1,37 @@
+[project]
+name = "screen-recording-voiceover"
+version = "0.1.0"
+description = "Screen recording with GPT-powered voiceover generation"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+dependencies = [
+    "opencv-python>=4.8.0",
+    "openai>=1.0.0",
+    "pillow>=10.0.0",
+    "pyautogui>=0.9.54",
+    "numpy>=1.24.0",
+    "python-dotenv>=1.0.0",
+    "mss>=9.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+exclude = [
+    ".env",
+    ".venv",
+    "*.mp4",
+    "*.mp3",
+    "*.txt",
+]
+
+[tool.hatch.envs.default]
+dependencies = [
+    "pytest",
+    "black",
+    "flake8",
+] 
