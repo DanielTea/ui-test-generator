@@ -1,7 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server'
 import OpenAI from 'openai'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 
 
+
+// Function to read system prompt from markdown file
+function getSystemPrompt(): string {
+  try {
+    const promptPath = join(process.cwd(), 'prompts', 'ui-test-generation.md')
+    const promptContent = readFileSync(promptPath, 'utf-8')
+    
+    // Extract the content after the title and before any code blocks
+    const lines = promptContent.split('\n')
+    const contentLines = lines.slice(2) // Skip title and empty line
+    
+    // Join lines and clean up markdown formatting
+    return contentLines
+      .join('\n')
+      .replace(/^##\s+/gm, '') // Remove markdown headers
+      .replace(/^\*\*([^*]+)\*\*:/gm, '$1:') // Clean up bold formatting
+      .replace(/`([^`]+)`/g, '$1') // Remove backticks
+      .trim()
+  } catch (error) {
+    console.warn('Could not read system prompt from file, using fallback:', error)
+    return getFallbackSystemPrompt()
+  }
+}
+
+// Fallback system prompt if file reading fails
+function getFallbackSystemPrompt(): string {
+  return `You are an expert UI test automation engineer. Your task is to analyze screen recording frames and generate comprehensive UI test scripts.
+
+Analyze the provided video frames showing a user interface workflow. Focus on:
+1. User Actions: Identify clicks, form inputs, navigation, and interactions
+2. UI Elements: Note buttons, forms, menus, modals, and other interface components
+3. State Changes: Observe how the UI responds to user actions
+4. Data Flow: Track information being entered, submitted, or displayed
+5. Navigation Patterns: Document page transitions and routing
+
+Generate a structured test script with exact element descriptions, sequential steps, and variable placeholders for dynamic data.`
+}
 
 // Helper function to extract lists from text
 function extractListFromText(text: string, keywords: string[]): string[] {
@@ -139,7 +178,7 @@ export async function POST(request: NextRequest) {
     const isUITestGeneration = settings.focusArea === 'ui-test-generation'
     
     const basePrompt = isUITestGeneration 
-      ? `Analyze these sequential screen recording frames to generate a comprehensive UI test script. Create a detailed test that can be executed to replicate the user's actions.
+      ? `${getSystemPrompt()}
 
     **REQUIRED JSON FORMAT:**
     {
@@ -228,10 +267,15 @@ export async function POST(request: NextRequest) {
     try {
       analysis = JSON.parse(analysisText)
       // Ensure the response has the required structure
+      if (!analysis.title) analysis.title = "UI Test"
       if (!analysis.summary) analysis.summary = "Analysis completed"
-      if (!Array.isArray(analysis.testSteps)) analysis.testSteps = []
+      if (!Array.isArray(analysis.steps)) analysis.steps = []
       if (!Array.isArray(analysis.variables)) analysis.variables = []
-      if (!Array.isArray(analysis.suggestions)) analysis.suggestions = []
+      
+      // Map new format to legacy format for backward compatibility
+      if (analysis.steps && !analysis.testSteps) {
+        analysis.testSteps = analysis.steps
+      }
       
       // Legacy support for older analysis types
       if (!Array.isArray(analysis.keyActions)) analysis.keyActions = []
@@ -260,10 +304,11 @@ export async function POST(request: NextRequest) {
         }
         
         analysis = {
+          title: "Generated UI Test",
           summary: lines[0] || "UI test analysis completed",
-          testSteps: testSteps,
-          variables: extractListFromText(analysisText, ['{{', '}}']).map(v => v.replace(/[{}]/g, '')),
-          suggestions: extractListFromText(analysisText, ['suggest', 'improve', 'recommend'])
+          steps: testSteps,
+          testSteps: testSteps, // Legacy compatibility
+          variables: extractListFromText(analysisText, ['{{', '}}']).map(v => v.replace(/[{}]/g, ''))
         }
       } else {
         analysis = {
@@ -277,10 +322,11 @@ export async function POST(request: NextRequest) {
 
     // Final validation to ensure proper structure
     const validatedAnalysis = {
+      title: analysis.title || "UI Test",
       summary: analysis.summary || "Analysis completed",
-      testSteps: Array.isArray(analysis.testSteps) ? analysis.testSteps : [],
+      steps: Array.isArray(analysis.steps) ? analysis.steps : [],
+      testSteps: Array.isArray(analysis.testSteps) ? analysis.testSteps : Array.isArray(analysis.steps) ? analysis.steps : [], // Legacy compatibility
       variables: Array.isArray(analysis.variables) ? analysis.variables : [],
-      suggestions: Array.isArray(analysis.suggestions) ? analysis.suggestions : [],
       // Legacy fields for backward compatibility
       keyActions: Array.isArray(analysis.keyActions) ? analysis.keyActions : [],
       mouseMovements: Array.isArray(analysis.mouseMovements) ? analysis.mouseMovements : []

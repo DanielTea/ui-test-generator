@@ -3,13 +3,18 @@
 import { useState, useRef } from 'react'
 
 interface AnalysisResult {
+  title?: string
   summary: string
+  steps?: Array<{
+    order: number
+    description: string
+    expected_outcome?: string
+  }>
   testSteps?: Array<{
     order: number
     description: string
     expected_outcome?: string
   }>
-  suggestions?: string[]
   variables?: string[]
 }
 
@@ -21,14 +26,29 @@ export default function ScreenRecorder() {
   const [error, setError] = useState<string | null>(null)
   const [recordingTime, setRecordingTime] = useState(0)
   const [permissionGranted, setPermissionGranted] = useState(false)
-  const [frameCount, setFrameCount] = useState(5)
+  const [frameCount, setFrameCount] = useState(30)
   const [showSettings, setShowSettings] = useState(false)
   const [extractedFrames, setExtractedFrames] = useState<string[]>([])
   const [showFrames, setShowFrames] = useState(false)
+  const [videoReady, setVideoReady] = useState(false)
+  const [videoLoading, setVideoLoading] = useState(false)
+  
+  // Video trimming state
+  const [videoDuration, setVideoDuration] = useState(0)
+  const [trimStart, setTrimStart] = useState(0)
+  const [trimEnd, setTrimEnd] = useState(0)
+  const [isDragging, setIsDragging] = useState<'start' | 'end' | null>(null)
+  const [showTrimmer, setShowTrimmer] = useState(false)
+  const [previewFrames, setPreviewFrames] = useState<{start: string | null, end: string | null}>({start: null, end: null})
+  const [showPreview, setShowPreview] = useState(false)
+  const [trimmedVideo, setTrimmedVideo] = useState<string | null>(null)
+  const [isTrimming, setIsTrimming] = useState(false)
+  const [videoFullyLoaded, setVideoFullyLoaded] = useState(false)
+  const [videoLoadingProgress, setVideoLoadingProgress] = useState(0)
   
   // Settings state for UI Test generation
   const [settings, setSettings] = useState({
-    frameCount: 5,
+    frameCount: 30, // Changed default to 30
     videoQuality: 0.8,
     maxRecordingTime: 300, // 5 minutes
     customPrompt: '',
@@ -70,6 +90,8 @@ export default function ScreenRecorder() {
       setExtractedFrames([])
       setShowFrames(false)
       setRecordingTime(0)
+      setVideoReady(false)
+      setVideoLoading(false)
       
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
@@ -97,6 +119,8 @@ export default function ScreenRecorder() {
         setRecordedVideo(videoUrl)
         setIsRecording(false)
         setRecordingTime(0)
+        setVideoReady(false)
+        setVideoLoading(true)
         if (timerRef.current) {
           clearInterval(timerRef.current)
         }
@@ -133,8 +157,48 @@ export default function ScreenRecorder() {
     }
   }
 
+  // Function to intelligently select unique frames
+  const selectUniqueFrames = (allFrames: string[], targetCount: number): string[] => {
+    if (allFrames.length === 0) return []
+    
+    // Create a map to track unique frames with their first occurrence index
+    const uniqueFrameMap = new Map<string, number>()
+    const uniqueFrames: string[] = []
+    
+    // First pass: identify unique frames and their positions
+    allFrames.forEach((frame, index) => {
+      if (!uniqueFrameMap.has(frame)) {
+        uniqueFrameMap.set(frame, index)
+        uniqueFrames.push(frame)
+      }
+    })
+    
+    console.log(`📊 Found ${uniqueFrames.length} unique frames from ${allFrames.length} total`)
+    
+    // If we have fewer unique frames than requested, return all unique frames
+    if (uniqueFrames.length <= targetCount) {
+      console.log(`✅ Using all ${uniqueFrames.length} unique frames (requested ${targetCount})`)
+      return uniqueFrames
+    }
+    
+    // If we have more unique frames than needed, select evenly distributed ones
+    const selectedFrames: string[] = []
+    const step = (uniqueFrames.length - 1) / (targetCount - 1)
+    
+    for (let i = 0; i < targetCount; i++) {
+      const index = Math.round(i * step)
+      selectedFrames.push(uniqueFrames[index])
+    }
+    
+    console.log(`🎯 Selected ${selectedFrames.length} frames evenly distributed from ${uniqueFrames.length} unique frames`)
+    return selectedFrames
+  }
+
   const analyzeVideo = async () => {
-    if (!recordedVideo) return
+    if (!recordedVideo || !videoReady) {
+      setError('Video is not ready for analysis yet. Please wait for the video to finish loading.')
+      return
+    }
 
     setIsAnalyzing(true)
     setError(null)
@@ -147,8 +211,12 @@ export default function ScreenRecorder() {
         frameEndPercent: settings.frameEndPercent
       })
       
+      // Use trimmed video if available, otherwise use original
+      let videoToAnalyze = trimmedVideo || recordedVideo
+      console.log(`🎬 Analyzing ${trimmedVideo ? 'trimmed' : 'original'} video`)
+      
       // Extract multiple frames from video for UI test generation
-      const frames = await extractMultipleFramesFromVideo(recordedVideo, settings.frameCount)
+      const frames = await extractMultipleFramesFromVideo(videoToAnalyze, settings.frameCount)
       
       console.log(`🎬 Frame extraction completed: ${frames?.length || 0} frames extracted`)
       
@@ -156,8 +224,12 @@ export default function ScreenRecorder() {
         throw new Error('Failed to extract frames from video')
       }
 
+      // Select unique frames intelligently
+      const uniqueFrames = selectUniqueFrames(frames, settings.frameCount)
+      console.log(`🎯 Selected ${uniqueFrames.length} unique frames from ${frames.length} total frames`)
+      
       // Store frames for display
-      setExtractedFrames(frames)
+      setExtractedFrames(uniqueFrames)
 
       // Send frames to API for analysis
       const analysisResponse = await fetch('/api/analyze-video', {
@@ -166,7 +238,7 @@ export default function ScreenRecorder() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          frames: frames,
+          frames: uniqueFrames,
           settings: settings,
         }),
       })
@@ -342,10 +414,10 @@ export default function ScreenRecorder() {
               duration = 30 // Assume max 30 seconds
             }
             
-            const captureIntervalTime = Math.max(100, (duration * 1000) / (frameCount * 2)) // Capture more frequently than needed
-            const targetFrames = frameCount
-            let lastCapturedTime = -1
-            const minTimeBetweenCaptures = duration / frameCount * 0.8 // Ensure good spacing
+            const captureIntervalTime = Math.max(100, (duration * 1000) / (frameCount * 6)) // Capture even more frequently
+            const targetFrames = frameCount * 2 // Capture more frames than needed to get good variety
+            let lastCapturedTime = -999 // Start with a very negative value to allow first capture
+            const minTimeBetweenCaptures = Math.max(0.3, duration / (frameCount * 2)) // Much smaller spacing to get more frames
             
             console.log(`📹 Starting playback capture: ${targetFrames} frames over ~${duration.toFixed(1)}s`)
             console.log(`  - Capture interval: ${captureIntervalTime.toFixed(0)}ms`)
@@ -365,14 +437,21 @@ export default function ScreenRecorder() {
               }
               
               const currentTime = video.currentTime
+              console.log(`🎥 Playback check: currentTime=${currentTime.toFixed(2)}s, lastCaptured=${lastCapturedTime.toFixed(2)}s, diff=${(currentTime - lastCapturedTime).toFixed(2)}s`)
+              
               // Only capture if we've moved forward enough
               if (currentTime - lastCapturedTime >= minTimeBetweenCaptures) {
+                console.log(`🎯 Attempting capture at ${currentTime.toFixed(2)}s`)
                 const frame = captureCurrentFrame()
                 if (frame) {
                   frames.push(frame)
                   lastCapturedTime = currentTime
                   console.log(`📸 Captured frame ${frames.length}/${targetFrames} at ${currentTime.toFixed(2)}s during playback`)
+                } else {
+                  console.log(`❌ Failed to capture frame at ${currentTime.toFixed(2)}s`)
                 }
+              } else {
+                console.log(`⏭️ Skipping capture - not enough time elapsed (need ${minTimeBetweenCaptures.toFixed(2)}s)`)
               }
             }, captureIntervalTime)
             
@@ -413,18 +492,24 @@ export default function ScreenRecorder() {
         // Try playback-based capture
         const playbackSuccess = await captureFramesDuringPlayback()
         
-        if (playbackSuccess && frames.length >= frameCount * 0.8) {
+        if (playbackSuccess && frames.length >= frameCount * 0.6) {
           console.log(`✅ Playback capture successful: ${frames.length} frames captured`)
           
           // Check frame diversity
           const uniqueFrames = new Set(frames)
           console.log(`🔍 Frame diversity: ${uniqueFrames.size}/${frames.length} unique frames`)
           
-          resolve(frames)
-          return
+          if (uniqueFrames.size > 1) {
+            console.log(`✅ Good diversity, using playback frames`)
+            resolve(frames)
+            return
+          } else {
+            console.log(`⚠️ Poor diversity in playback frames, trying seeking approach`)
+            frames.length = 0 // Clear frames for seeking approach
+          }
+        } else {
+          console.log(`⚠️ Playback capture incomplete (${frames.length}/${frameCount}), falling back to seeking...`)
         }
-        
-        console.log(`⚠️ Playback capture incomplete (${frames.length}/${frameCount}), falling back to seeking...`)
         
         // Reset video for seeking approach
         video.pause()
@@ -541,25 +626,30 @@ export default function ScreenRecorder() {
         console.log(`  - End time: ${endTime.toFixed(2)}s (${settings.frameEndPercent}%)`)
         console.log(`  - Available time span: ${availableTime.toFixed(2)}s`)
         console.log(`  - Interval between frames: ${interval.toFixed(2)}s`)
-        console.log(`  - Extracting ${frameCount} frames...`)
+        
+        // Capture more frames than needed for better variety
+        const extraFrameCount = Math.min(frameCount * 3, 100) // Capture up to 3x more frames, max 100
+        const extraInterval = frameCount > 1 ? availableTime / (extraFrameCount - 1) : 0
+        
+        console.log(`  - Extracting ${extraFrameCount} frames for selection...`)
         
         const timePositions: number[] = []
-        for (let i = 0; i < frameCount; i++) {
-          const timePosition = frameCount > 1 ? startTime + (interval * i) : startTime
+        for (let i = 0; i < extraFrameCount; i++) {
+          const timePosition = extraFrameCount > 1 ? startTime + (extraInterval * i) : startTime
           timePositions.push(timePosition)
         }
         
         console.log(`📍 Frame positions:`, timePositions.map(t => t.toFixed(2) + 's').join(', '))
         
-        for (let i = 0; i < frameCount; i++) {
+        for (let i = 0; i < extraFrameCount; i++) {
           const timePosition = timePositions[i]
-          console.log(`🎯 Extracting frame ${i + 1}/${frameCount} at ${timePosition.toFixed(2)}s`)
+          console.log(`🎯 Extracting frame ${i + 1}/${extraFrameCount} at ${timePosition.toFixed(2)}s`)
           const frame = await captureFrame(timePosition)
           if (frame) {
             frames.push(frame)
-            console.log(`✅ Successfully captured frame ${i + 1}/${frameCount} at ${timePosition.toFixed(2)}s`)
+            console.log(`✅ Successfully captured frame ${i + 1}/${extraFrameCount} at ${timePosition.toFixed(2)}s`)
           } else {
-            console.log(`❌ Failed to capture frame ${i + 1}/${frameCount} at ${timePosition.toFixed(2)}s`)
+            console.log(`❌ Failed to capture frame ${i + 1}/${extraFrameCount} at ${timePosition.toFixed(2)}s`)
           }
         }
         
@@ -571,7 +661,44 @@ export default function ScreenRecorder() {
           const uniqueFrames = new Set(frames)
           console.log(`🔍 Frame diversity: ${uniqueFrames.size}/${frames.length} unique frames`)
           if (uniqueFrames.size === 1) {
-            console.warn(`⚠️ WARNING: All frames appear to be identical! This suggests the video might be very short or seeking is not working properly.`)
+            console.warn(`⚠️ WARNING: All frames appear to be identical! Trying alternative capture method...`)
+            
+            // Try one more approach: capture frames by playing and pausing at specific intervals
+            frames.length = 0
+            video.currentTime = 0
+            await new Promise(resolve => setTimeout(resolve, 200))
+            
+            // Capture more frames than needed for better variety
+            const extraFrameCount = Math.min(frameCount * 3, 100) // Capture up to 3x more frames, max 100
+            
+            console.log(`🔄 Attempting play-pause capture method for ${extraFrameCount} frames...`)
+            for (let i = 0; i < extraFrameCount; i++) {
+              const targetTime = (actualDuration / extraFrameCount) * i
+              console.log(`⏯️ Play-pause capture ${i + 1}/${extraFrameCount} at ${targetTime.toFixed(2)}s`)
+              
+              video.currentTime = targetTime
+              await new Promise(resolve => setTimeout(resolve, 200)) // Reduced wait time
+              
+              // Play briefly to ensure frame updates
+              try {
+                await video.play()
+                await new Promise(resolve => setTimeout(resolve, 100))
+                video.pause()
+                await new Promise(resolve => setTimeout(resolve, 100))
+                
+                const frame = captureCurrentFrame()
+                if (frame) {
+                  frames.push(frame)
+                  console.log(`✅ Play-pause captured frame ${i + 1}`)
+                }
+              } catch (e) {
+                console.log(`❌ Play-pause failed for frame ${i + 1}`)
+              }
+            }
+            
+            const finalUniqueFrames = new Set(frames)
+            console.log(`🔍 Play-pause diversity: ${finalUniqueFrames.size}/${frames.length} unique frames`)
+            
           } else if (uniqueFrames.size < frames.length * 0.5) {
             console.warn(`⚠️ WARNING: Many frames appear to be duplicates (${uniqueFrames.size}/${frames.length} unique)`)
           } else {
@@ -621,12 +748,345 @@ export default function ScreenRecorder() {
     if (recordedVideo) {
       URL.revokeObjectURL(recordedVideo)
     }
+    if (trimmedVideo) {
+      URL.revokeObjectURL(trimmedVideo)
+    }
     setRecordedVideo(null)
+    setTrimmedVideo(null)
     setAnalysis(null)
     setError(null)
     setRecordingTime(0)
     setExtractedFrames([])
     setShowFrames(false)
+    setVideoReady(false)
+    setVideoLoading(false)
+    setShowTrimmer(false)
+    setTrimStart(0)
+    setTrimEnd(0)
+    setVideoDuration(0)
+    setPreviewFrames({start: null, end: null})
+    setIsTrimming(false)
+    setVideoFullyLoaded(false)
+    setVideoLoadingProgress(0)
+  }
+
+  // Video loading and trimming functions
+  const waitForVideoToFullyLoad = async (video: HTMLVideoElement): Promise<boolean> => {
+    console.log('⏳ Waiting for video to fully load...')
+    setVideoFullyLoaded(false)
+    setVideoLoadingProgress(0)
+    
+    return new Promise((resolve) => {
+      let progressInterval: NodeJS.Timeout
+      let timeoutId: NodeJS.Timeout
+      let resolved = false
+      
+      const cleanup = () => {
+        if (progressInterval) clearInterval(progressInterval)
+        if (timeoutId) clearTimeout(timeoutId)
+      }
+      
+      let resolveOnce = (success: boolean) => {
+        if (resolved) return
+        resolved = true
+        cleanup()
+        setVideoFullyLoaded(success)
+        if (success) setVideoLoadingProgress(100)
+        resolve(success)
+      }
+      
+      // Timeout after 30 seconds
+      timeoutId = setTimeout(() => {
+        console.log('⏰ Video loading timeout')
+        resolveOnce(false)
+      }, 30000)
+      
+      // Progress simulation (visual feedback)
+      progressInterval = setInterval(() => {
+        setVideoLoadingProgress(prev => Math.min(prev + 1, 90))
+      }, 200)
+      
+      // Multiple event listeners for different loading stages
+      const onLoadedMetadata = () => {
+        console.log('📊 Metadata loaded, duration:', video.duration)
+        setVideoLoadingProgress(30)
+      }
+      
+      const onLoadedData = () => {
+        console.log('📦 Data loaded, readyState:', video.readyState)
+        setVideoLoadingProgress(60)
+      }
+      
+      const onCanPlay = () => {
+        console.log('▶️ Can play, duration:', video.duration)
+        setVideoLoadingProgress(80)
+      }
+      
+      const onCanPlayThrough = () => {
+        console.log('🎬 Can play through - video fully loaded!')
+        console.log('📊 Final stats - Duration:', video.duration, 'ReadyState:', video.readyState)
+        
+        if (isFinite(video.duration) && video.duration > 0) {
+          resolveOnce(true)
+        } else {
+          console.log('❌ Duration still invalid after full load')
+          resolveOnce(false)
+        }
+      }
+      
+      const onProgress = () => {
+        if (video.buffered.length > 0) {
+          const bufferedEnd = video.buffered.end(video.buffered.length - 1)
+          const progress = Math.min((bufferedEnd / video.duration) * 70 + 20, 90)
+          setVideoLoadingProgress(progress)
+        }
+      }
+      
+      // Add all event listeners
+      video.addEventListener('loadedmetadata', onLoadedMetadata)
+      video.addEventListener('loadeddata', onLoadedData)
+      video.addEventListener('canplay', onCanPlay)
+      video.addEventListener('canplaythrough', onCanPlayThrough)
+      video.addEventListener('progress', onProgress)
+      
+      // Cleanup function
+      const removeListeners = () => {
+        video.removeEventListener('loadedmetadata', onLoadedMetadata)
+        video.removeEventListener('loadeddata', onLoadedData)
+        video.removeEventListener('canplay', onCanPlay)
+        video.removeEventListener('canplaythrough', onCanPlayThrough)
+        video.removeEventListener('progress', onProgress)
+      }
+      
+      // Clean up listeners when done
+      const originalResolve = resolveOnce
+      resolveOnce = (success: boolean) => {
+        removeListeners()
+        originalResolve(success)
+      }
+      
+      // Check if already loaded
+      if (video.readyState >= 4 && isFinite(video.duration) && video.duration > 0) {
+        console.log('✅ Video already fully loaded')
+        resolveOnce(true)
+      }
+    })
+  }
+
+  const initializeTrimmer = async (video: HTMLVideoElement) => {
+    console.log('🎬 Initializing trimmer...')
+    
+    // First, wait for video to fully load
+    const fullyLoaded = await waitForVideoToFullyLoad(video)
+    
+    if (!fullyLoaded) {
+      console.log('❌ Video failed to load properly')
+      return false
+    }
+    
+    console.log('✅ Video fully loaded, initializing trimmer with duration:', video.duration)
+    setVideoDuration(video.duration)
+    setTrimStart(0)
+    setTrimEnd(video.duration)
+    setShowTrimmer(true)
+    
+    // Capture initial frames for start and end positions
+    setTimeout(async () => {
+      const startFrame = await captureFrameAtTime(0)
+      const endFrame = await captureFrameAtTime(video.duration)
+      setPreviewFrames({
+        start: startFrame,
+        end: endFrame
+      })
+    }, 500) // Small delay to ensure video is ready
+    
+    return true
+  }
+
+  const handleVideoLoadedMetadata = async (video: HTMLVideoElement) => {
+    console.log('📹 Video metadata event triggered')
+    await initializeTrimmer(video)
+  }
+
+  const handleTrimmerMouseDown = (type: 'start' | 'end', e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsDragging(type)
+  }
+
+  const handleTrimmerMouseMove = async (e: React.MouseEvent) => {
+    if (!isDragging || !isFinite(videoDuration) || videoDuration <= 0) return
+    
+    const rect = e.currentTarget.getBoundingClientRect()
+    if (rect.width <= 0) return
+    
+    const x = e.clientX - rect.left
+    const percentage = Math.max(0, Math.min(1, x / rect.width))
+    const time = percentage * videoDuration
+    
+    setShowPreview(true)
+    
+    if (isDragging === 'start') {
+      const newStartTime = Math.min(time, trimEnd - 0.1) // Ensure start is before end
+      setTrimStart(newStartTime)
+      
+      // Capture preview frame for start position
+      const frame = await captureFrameAtTime(newStartTime)
+      if (frame) {
+        setPreviewFrames(prev => ({ ...prev, start: frame }))
+      }
+    } else if (isDragging === 'end') {
+      const newEndTime = Math.max(time, trimStart + 0.1) // Ensure end is after start
+      setTrimEnd(newEndTime)
+      
+      // Capture preview frame for end position
+      const frame = await captureFrameAtTime(newEndTime)
+      if (frame) {
+        setPreviewFrames(prev => ({ ...prev, end: frame }))
+      }
+    }
+  }
+
+  const handleTrimmerMouseUp = () => {
+    setIsDragging(null)
+    setShowPreview(false)
+  }
+
+  // Function to capture frame at specific time
+  const captureFrameAtTime = async (timePosition: number): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const video = document.querySelector('video') as HTMLVideoElement
+      if (!video || !recordedVideo) {
+        resolve(null)
+        return
+      }
+
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        resolve(null)
+        return
+      }
+
+      const originalTime = video.currentTime
+      
+      const onSeeked = () => {
+        try {
+          canvas.width = video.videoWidth || 320
+          canvas.height = video.videoHeight || 240
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+          const base64 = canvas.toDataURL('image/jpeg', 0.7).split(',')[1]
+          
+          // Restore original time
+          video.currentTime = originalTime
+          video.removeEventListener('seeked', onSeeked)
+          resolve(base64)
+        } catch (error) {
+          console.error('Error capturing preview frame:', error)
+          video.removeEventListener('seeked', onSeeked)
+          resolve(null)
+        }
+      }
+
+      video.addEventListener('seeked', onSeeked)
+      video.currentTime = timePosition
+      
+      // Timeout fallback
+      setTimeout(() => {
+        video.removeEventListener('seeked', onSeeked)
+        resolve(null)
+      }, 1000)
+    })
+  }
+
+  const performVideoTrim = async (): Promise<void> => {
+    if (!recordedVideo || !isFinite(videoDuration) || videoDuration <= 0) return
+
+    setIsTrimming(true)
+    console.log(`✂️ Starting video trim from ${formatTimeForTrimmer(trimStart)} to ${formatTimeForTrimmer(trimEnd)}`)
+
+    try {
+      // Use FFmpeg-like approach with MediaRecorder for better quality
+      const video = document.createElement('video')
+      video.src = recordedVideo
+      video.muted = true
+      
+      await new Promise((resolve) => {
+        video.onloadedmetadata = resolve
+      })
+
+      const canvas = document.createElement('canvas')
+      const ctx = canvas.getContext('2d')!
+      canvas.width = video.videoWidth || 640
+      canvas.height = video.videoHeight || 480
+
+      const chunks: Blob[] = []
+      const stream = canvas.captureStream(30)
+      const recorder = new MediaRecorder(stream, { 
+        mimeType: 'video/webm;codecs=vp9',
+        videoBitsPerSecond: 2500000 // 2.5 Mbps for good quality
+      })
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data)
+      }
+
+      recorder.onstop = () => {
+        const trimmedBlob = new Blob(chunks, { type: 'video/webm' })
+        const trimmedUrl = URL.createObjectURL(trimmedBlob)
+        
+        // Clean up old trimmed video if it exists
+        if (trimmedVideo) {
+          URL.revokeObjectURL(trimmedVideo)
+        }
+        
+        setTrimmedVideo(trimmedUrl)
+        console.log('✅ Video trimmed successfully')
+        setIsTrimming(false)
+      }
+
+      // Start recording
+      recorder.start()
+      
+      // Seek to start position and play
+      video.currentTime = trimStart
+      
+      const startTime = Date.now()
+      const expectedDuration = (trimEnd - trimStart) * 1000 // Convert to milliseconds
+      
+      const drawFrame = () => {
+        const elapsed = Date.now() - startTime
+        
+        if (elapsed >= expectedDuration || video.currentTime >= trimEnd) {
+          recorder.stop()
+          video.pause()
+          return
+        }
+        
+        if (video.readyState >= 2) { // HAVE_CURRENT_DATA
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        }
+        
+        requestAnimationFrame(drawFrame)
+      }
+
+      video.oncanplay = () => {
+        video.play()
+        drawFrame()
+      }
+
+    } catch (error) {
+      console.error('Error trimming video:', error)
+      setIsTrimming(false)
+    }
+  }
+
+  const formatTimeForTrimmer = (seconds: number) => {
+    if (!isFinite(seconds) || isNaN(seconds) || seconds < 0) {
+      return '00:00'
+    }
+    const mins = Math.floor(seconds / 60)
+    const secs = Math.floor(seconds % 60)
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
 
   const formatTime = (seconds: number) => {
@@ -925,7 +1385,290 @@ export default function ScreenRecorder() {
             controls
             className="w-full max-w-2xl mx-auto rounded-lg shadow-md"
             src={recordedVideo}
+            onLoadedData={() => {
+              console.log('Video data loaded')
+              setVideoLoading(false)
+            }}
+            onCanPlay={async (e) => {
+              const video = e.target as HTMLVideoElement
+              console.log('📺 Video can play, duration:', video.duration)
+              setVideoReady(true)
+              if (videoDuration === 0) {
+                await initializeTrimmer(video)
+              }
+            }}
+            onCanPlayThrough={() => {
+              console.log('Video can play through - fully ready')
+              setVideoReady(true)
+            }}
+            onLoadedMetadata={(e) => {
+              const video = e.target as HTMLVideoElement
+              handleVideoLoadedMetadata(video)
+            }}
+            onDurationChange={async (e) => {
+              const video = e.target as HTMLVideoElement
+              console.log('⏱️ Duration changed:', video.duration)
+              if (videoDuration === 0) {
+                await initializeTrimmer(video)
+              }
+            }}
+            onError={(e) => {
+              console.error('Video error:', e)
+              setVideoLoading(false)
+              setVideoReady(false)
+            }}
           />
+          
+          {/* Video Loading Progress */}
+          {!videoFullyLoaded && videoLoadingProgress > 0 && (
+            <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg max-w-2xl mx-auto">
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-5 h-5 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <span className="text-blue-800 font-medium">Processing video...</span>
+                <span className="text-blue-600 text-sm">{Math.round(videoLoadingProgress)}%</span>
+              </div>
+              <div className="w-full bg-blue-200 rounded-full h-2">
+                <div 
+                  className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
+                  style={{ width: `${videoLoadingProgress}%` }}
+                ></div>
+              </div>
+              <p className="text-blue-700 text-sm mt-2">
+                Please wait while the video is being processed. The trimmer and analysis will be available once ready.
+              </p>
+            </div>
+          )}
+          
+          {/* Video Trimmer */}
+          {showTrimmer && videoFullyLoaded && (
+            <div className="mt-4 p-4 bg-gray-50 border border-gray-200 rounded-lg max-w-2xl mx-auto">
+              <div className="flex items-center justify-between mb-2">
+                <h4 className="font-semibold text-gray-800">✂️ Trim Video</h4>
+                <span className="text-sm text-gray-600">
+                  {formatTimeForTrimmer(trimEnd - trimStart)} selected
+                </span>
+              </div>
+              
+              <div className="mb-3">
+                <div 
+                  className="relative w-full h-8 bg-gray-300 rounded-lg cursor-pointer select-none"
+                  onMouseMove={handleTrimmerMouseMove}
+                  onMouseUp={handleTrimmerMouseUp}
+                  onMouseLeave={handleTrimmerMouseUp}
+                >
+                  {/* Video timeline background */}
+                  <div className="absolute inset-0 bg-blue-200 rounded-lg"></div>
+                  
+                  {/* Selected range */}
+                  <div 
+                    className="absolute top-0 bottom-0 bg-blue-500 rounded-lg"
+                    style={{
+                      left: `${(trimStart / videoDuration) * 100}%`,
+                      width: `${((trimEnd - trimStart) / videoDuration) * 100}%`
+                    }}
+                  ></div>
+                  
+                  {/* Start handle */}
+                  <div
+                    className="absolute top-0 bottom-0 w-3 bg-blue-700 rounded-l-lg cursor-ew-resize hover:bg-blue-800 transition-colors"
+                    style={{ left: `${(trimStart / videoDuration) * 100}%` }}
+                    onMouseDown={(e) => handleTrimmerMouseDown('start', e)}
+                  >
+                    <div className="absolute top-1/2 left-1/2 w-1 h-4 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2"></div>
+                  </div>
+                  
+                  {/* End handle */}
+                  <div
+                    className="absolute top-0 bottom-0 w-3 bg-blue-700 rounded-r-lg cursor-ew-resize hover:bg-blue-800 transition-colors"
+                    style={{ left: `${(trimEnd / videoDuration) * 100 - 3}%` }}
+                    onMouseDown={(e) => handleTrimmerMouseDown('end', e)}
+                  >
+                    <div className="absolute top-1/2 left-1/2 w-1 h-4 bg-white rounded-full transform -translate-x-1/2 -translate-y-1/2"></div>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex items-center justify-between text-sm text-gray-600 mb-3">
+                <div className="flex items-center gap-4">
+                  <span>Start: {formatTimeForTrimmer(trimStart)}</span>
+                  <span>End: {formatTimeForTrimmer(trimEnd)}</span>
+                  <span className="text-blue-600 font-medium">
+                    Duration: {formatTimeForTrimmer(trimEnd - trimStart)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    setTrimStart(0)
+                    setTrimEnd(videoDuration)
+                    setPreviewFrames({start: null, end: null})
+                    if (trimmedVideo) {
+                      URL.revokeObjectURL(trimmedVideo)
+                      setTrimmedVideo(null)
+                    }
+                  }}
+                  className="px-2 py-1 text-xs bg-gray-200 hover:bg-gray-300 rounded transition-colors"
+                >
+                  Reset
+                </button>
+              </div>
+              
+              {/* Trim Action Buttons */}
+              <div className="flex items-center justify-center gap-3 mb-3">
+                <button
+                  onClick={performVideoTrim}
+                  disabled={isTrimming || (trimStart === 0 && trimEnd === videoDuration)}
+                  className={`px-4 py-2 rounded-lg transition-colors flex items-center gap-2 ${
+                    isTrimming || (trimStart === 0 && trimEnd === videoDuration)
+                      ? 'bg-gray-300 cursor-not-allowed text-gray-500'
+                      : 'bg-blue-600 hover:bg-blue-700 text-white'
+                  }`}
+                >
+                  {isTrimming ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      Trimming...
+                    </>
+                  ) : (
+                    <>✂️ Trim Video</>
+                  )}
+                </button>
+                
+                {trimmedVideo && (
+                  <div className="flex items-center gap-2 text-green-600 text-sm">
+                    <span>✅</span>
+                    <span>Video trimmed successfully!</span>
+                  </div>
+                )}
+              </div>
+              
+              {/* Frame Previews */}
+              {showPreview && (isDragging === 'start' && previewFrames.start || isDragging === 'end' && previewFrames.end) && (
+                <div className="mt-3 p-3 bg-white border border-gray-300 rounded-lg">
+                  <div className="text-xs font-medium text-gray-700 mb-2">
+                    {isDragging === 'start' ? '🎬 Start Frame Preview' : '🎬 End Frame Preview'}
+                  </div>
+                  <div className="flex justify-center">
+                    <img
+                      src={`data:image/jpeg;base64,${isDragging === 'start' ? previewFrames.start : previewFrames.end}`}
+                      alt={`${isDragging} frame preview`}
+                      className="max-w-32 max-h-24 rounded border border-gray-200 shadow-sm"
+                    />
+                  </div>
+                  <div className="text-xs text-gray-500 text-center mt-1">
+                    {isDragging === 'start' ? formatTimeForTrimmer(trimStart) : formatTimeForTrimmer(trimEnd)}
+                  </div>
+                </div>
+              )}
+              
+              {/* Static Frame Previews when not dragging */}
+              {!showPreview && (previewFrames.start || previewFrames.end) && (
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  {previewFrames.start && (
+                    <div className="p-2 bg-white border border-gray-300 rounded-lg">
+                      <div className="text-xs font-medium text-gray-700 mb-1">Start Frame</div>
+                      <img
+                        src={`data:image/jpeg;base64,${previewFrames.start}`}
+                        alt="Start frame"
+                        className="w-full max-h-20 object-cover rounded border border-gray-200"
+                      />
+                      <div className="text-xs text-gray-500 text-center mt-1">
+                        {formatTimeForTrimmer(trimStart)}
+                      </div>
+                    </div>
+                  )}
+                  {previewFrames.end && (
+                    <div className="p-2 bg-white border border-gray-300 rounded-lg">
+                      <div className="text-xs font-medium text-gray-700 mb-1">End Frame</div>
+                      <img
+                        src={`data:image/jpeg;base64,${previewFrames.end}`}
+                        alt="End frame"
+                        className="w-full max-h-20 object-cover rounded border border-gray-200"
+                      />
+                      <div className="text-xs text-gray-500 text-center mt-1">
+                        {formatTimeForTrimmer(trimEnd)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* Video Loading Status */}
+          {videoLoading && (
+            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <span className="text-blue-700">Processing video...</span>
+              </div>
+            </div>
+          )}
+          
+          {!videoLoading && !videoReady && (
+            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <div className="flex items-center gap-2">
+                <span className="text-yellow-600">⏳</span>
+                <span className="text-yellow-700">Video not ready for analysis yet</span>
+              </div>
+            </div>
+          )}
+          
+          {/* Trimmed Video Preview */}
+          {trimmedVideo && (
+            <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
+              <h4 className="font-semibold text-green-800 mb-2">✂️ Trimmed Video Preview</h4>
+              <video
+                src={trimmedVideo}
+                controls
+                className="w-full max-w-md mx-auto rounded-lg shadow-md"
+              />
+              <div className="text-center mt-2 text-sm text-green-700">
+                This trimmed video will be used for analysis
+              </div>
+            </div>
+          )}
+          
+          {/* Debug Info */}
+          {process.env.NODE_ENV === 'development' && (
+            <div className="mt-2 p-2 bg-gray-100 border border-gray-300 rounded text-xs">
+              <strong>Debug:</strong> videoDuration: {videoDuration}, showTrimmer: {showTrimmer.toString()}, 
+              trimStart: {trimStart}, trimEnd: {trimEnd}
+            </div>
+          )}
+          
+          {videoReady && (
+            <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-green-600">✅</span>
+                  <span className="text-green-700">Video ready for analysis!</span>
+                </div>
+                {!showTrimmer && !videoFullyLoaded && videoLoadingProgress === 0 && (
+                  <button
+                    onClick={async () => {
+                      const videoEl = document.querySelector('video') as HTMLVideoElement
+                      if (videoEl) {
+                        console.log('🔧 Manual trimmer activation, duration:', videoEl.duration)
+                        const success = await initializeTrimmer(videoEl)
+                        if (!success) {
+                          // Force show with estimated duration
+                          console.log('🔧 Forcing trimmer with estimated duration')
+                          setVideoDuration(30) // Default 30 seconds
+                          setTrimStart(0)
+                          setTrimEnd(30)
+                          setShowTrimmer(true)
+                          setVideoFullyLoaded(true) // Allow usage
+                        }
+                      }
+                    }}
+                    className="px-3 py-1 text-xs bg-blue-100 text-blue-700 rounded hover:bg-blue-200 transition-colors"
+                  >
+                    ✂️ Force Show Trimmer
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
           
                       <div className="space-y-4">
             {/* Frame Count and Preview */}
@@ -962,16 +1705,27 @@ export default function ScreenRecorder() {
             <div className="flex gap-3 justify-center">
               <button
                 onClick={analyzeVideo}
-                disabled={isAnalyzing}
-                className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-6 py-2 rounded-lg transition-colors flex items-center gap-2"
+                disabled={isAnalyzing || !videoReady || !videoFullyLoaded}
+                className={`px-6 py-2 rounded-lg transition-colors flex items-center gap-2 ${
+                  isAnalyzing || !videoReady || !videoFullyLoaded
+                    ? 'bg-gray-400 cursor-not-allowed text-white' 
+                    : 'bg-blue-600 hover:bg-blue-700 text-white'
+                }`}
               >
                 {isAnalyzing ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
                     Analyzing {settings.frameCount} frames...
                   </>
+                ) : !videoFullyLoaded ? (
+                  <>⏳ Processing video... ({Math.round(videoLoadingProgress)}%)</>
+                ) : !videoReady ? (
+                  <>⏳ Waiting for video to be ready...</>
                 ) : (
-                  <>🧪 Generate UI Test ({settings.frameCount} frames)</>
+                  <>
+                    🧪 Generate UI Test ({settings.frameCount} frames)
+                    {trimmedVideo && <span className="text-blue-200 text-xs ml-2">(trimmed)</span>}
+                  </>
                 )}
               </button>
               
@@ -990,7 +1744,7 @@ export default function ScreenRecorder() {
       {extractedFrames.length > 0 && showFrames && (
         <div className="mb-6">
           <h3 className="text-lg font-semibold mb-3">
-            🖼️ Frames Sent to AI ({extractedFrames.length}/{settings.frameCount} requested)
+            🖼️ Unique Frames Sent to AI ({extractedFrames.length} selected from captured frames)
           </h3>
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {extractedFrames.map((frame, index) => (
@@ -1013,7 +1767,7 @@ export default function ScreenRecorder() {
       {analysis && (
         <div className="mt-6 p-6 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg border border-blue-200">
           <h3 className="text-xl font-semibold mb-4 text-blue-900">
-            🧠 AI Analysis Results
+            🧠 {analysis.title || 'UI Test Analysis Results'}
           </h3>
           
           <div className="space-y-4">
@@ -1022,17 +1776,28 @@ export default function ScreenRecorder() {
               <p className="text-gray-700 leading-relaxed">{analysis.summary}</p>
             </div>
             
-            {analysis.testSteps && analysis.testSteps.length > 0 && (
+            {(analysis.steps || analysis.testSteps) && (analysis.steps || analysis.testSteps)!.length > 0 && (
               <div>
                 <h4 className="font-semibold text-gray-800 mb-3">🧪 Generated UI Test Steps:</h4>
                 <div className="bg-gray-900 rounded-lg p-4 overflow-x-auto">
                   <pre className="text-green-400 text-sm font-mono">
-                    {JSON.stringify(analysis.testSteps, null, 2)}
+                    {JSON.stringify({
+                      title: analysis.title,
+                      summary: analysis.summary,
+                      steps: analysis.steps || analysis.testSteps,
+                      variables: analysis.variables
+                    }, null, 2)}
                   </pre>
                 </div>
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText(JSON.stringify(analysis.testSteps, null, 2))
+                    const testData = {
+                      title: analysis.title,
+                      summary: analysis.summary,
+                      steps: analysis.steps || analysis.testSteps,
+                      variables: analysis.variables
+                    }
+                    navigator.clipboard.writeText(JSON.stringify(testData, null, 2))
                     // You could add a toast notification here
                   }}
                   className="mt-2 px-3 py-1 bg-blue-100 text-blue-700 rounded text-sm hover:bg-blue-200"
@@ -1055,16 +1820,7 @@ export default function ScreenRecorder() {
               </div>
             )}
             
-            {analysis.suggestions && analysis.suggestions.length > 0 && (
-              <div>
-                <h4 className="font-semibold text-gray-800 mb-2">💡 Suggestions:</h4>
-                <ul className="list-disc list-inside space-y-1">
-                  {analysis.suggestions.map((suggestion, index) => (
-                    <li key={index} className="text-gray-700">{suggestion}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
+
           </div>
         </div>
       )}

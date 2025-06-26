@@ -5,18 +5,21 @@ A modern web application that records your screen interactions and automatically
 ## Features
 
 - 🧪 **AI-Powered UI Test Generation**: Automatically creates test scripts from recorded workflows
-- 🖼️ **Frame Visualization**: See exactly which frames are being analyzed by the AI
-- ⚙️ **Configurable Detail Levels**: Choose from 3-30 frames for basic to ultra-detailed test coverage
+- ✂️ **Video Trimming**: iPhone-style drag-and-drop video trimming to focus on specific workflow sections
+- 🖼️ **Intelligent Frame Selection**: Automatically captures and selects unique frames, eliminating duplicates
+- ⚙️ **Configurable Detail Levels**: Choose from 3-50 frames for basic to ultra-detailed test coverage (default: 30)
 - 💰 **Cost Estimation**: Real-time cost estimates for AI analysis
 - 📱 **Modern UI**: Clean, responsive interface built with Next.js and Tailwind CSS
-- 🔧 **Flexible Settings**: Customizable analysis parameters and test instructions
+- 🔧 **Smart Frame Processing**: Multiple fallback methods ensure optimal frame extraction across all video types
 
 ## How It Works
 
 1. **Record**: Click "Start Recording" to capture your screen as you perform UI workflows
-2. **Analyze**: Select your preferred detail level (more frames = more detailed test steps)
-3. **Generate**: AI analyzes the key frames and generates structured UI test scripts
-4. **Review**: View the extracted frames and generated test JSON with variables and expected outcomes
+2. **Trim**: Use the iPhone-style trimmer to cut your video to the exact workflow section you want to test
+3. **Process**: System intelligently captures multiple frames and selects unique ones across the entire video
+4. **Analyze**: Select your preferred detail level (more frames = more detailed test steps, default: 30)
+5. **Generate**: AI analyzes the selected unique frames and generates structured UI test scripts
+6. **Review**: View the unique frames sent to AI and the generated test JSON with variables and expected outcomes
 
 ## Generated Test Format
 
@@ -46,7 +49,11 @@ The AI generates test scripts in this structured format:
 - **Basic (3 frames)**: ~$0.05 per test generation
 - **Standard (5 frames)**: ~$0.08 per test generation  
 - **Detailed (10 frames)**: ~$0.15 per test generation
-- **Comprehensive (15+ frames)**: $0.25+ per test generation
+- **Comprehensive (15 frames)**: ~$0.25 per test generation
+- **High Detail (20 frames)**: ~$0.30 per test generation
+- **Ultra Detail (30+ frames)**: $0.45+ per test generation (default: 30 frames)
+
+*Note: Only unique frames are sent to the AI, optimizing both cost and analysis quality.*
 
 ## Technical Stack
 
@@ -54,6 +61,7 @@ The AI generates test scripts in this structured format:
 - **AI Integration**: OpenAI GPT-4 Vision API / Azure OpenAI
 - **Recording**: Browser MediaRecorder API with screen capture
 - **Frame Analysis**: HTML5 Canvas for frame extraction and processing
+- **Prompt Management**: Markdown-based system prompts for easy customization
 
 ## Setup
 
@@ -82,6 +90,21 @@ npm run dev
 ```
 
 4. Open [http://localhost:3000](http://localhost:3000) to start generating UI tests!
+
+## Customizing AI Prompts
+
+The system prompt used for UI test generation is stored in `prompts/ui-test-generation.md`. You can:
+
+1. **Edit the prompt**: Modify the markdown file to change how the AI analyzes your recordings
+2. **Add custom instructions**: Include specific requirements for your testing framework
+3. **Adjust analysis focus**: Change what aspects of the UI the AI should prioritize
+4. **Test changes**: The system automatically reads the updated prompt on each API call
+
+Example customizations:
+- Add specific element selector formats (CSS, XPath, etc.)
+- Include company-specific testing standards
+- Modify the JSON output format
+- Add domain-specific terminology or requirements
 
 ## Use Cases
 
